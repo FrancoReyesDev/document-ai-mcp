@@ -1,10 +1,11 @@
 import type { Request, Response } from "express";
 import { OAuth2Client } from "google-auth-library";
-import { updateTask, incrementPagesUsed } from "./storage/index.js";
-import { getDocumentAIClient, PROCESSORS, processDocument, formatOcrToMarkdown, formatFormToMarkdown, formatLayoutToMarkdown } from "./documentai/index.js";
+import { getUserByApiKeyHash, updateTask, incrementPagesUsed, checkAndResetQuota } from "./storage/index.js";
+import { getDocumentAIClient, PROCESSORS, processDocument, formatOcrToMarkdown, formatFormToMarkdown, formatLayoutToMarkdown, countPdfPages } from "./documentai/index.js";
 import { splitMarkdownPages } from "./documentai/split-pages.js";
-import { uploadPagedResult } from "./gcs/index.js";
+import { uploadPagedResult, getPageCountFromMetadata, downloadGcsFile } from "./gcs/index.js";
 import type { ToolName, DocumentInput } from "./types.js";
+import { PLAN_MAX_PAGES_PER_DOC } from "./types.js";
 
 const oidcClient = new OAuth2Client();
 
@@ -27,13 +28,9 @@ const PROCESSOR_KEYS: Record<ToolName, keyof typeof PROCESSORS> = {
   parse_layout: "layoutParser",
 };
 
-/**
- * Verifies the OIDC token from Cloud Tasks.
- * Skips verification if WORKER_SA_EMAIL is not configured (dev mode).
- */
 async function verifyOidc(req: Request): Promise<boolean> {
   const saEmail = process.env.WORKER_SA_EMAIL;
-  if (!saEmail) return true; // Dev mode: skip verification
+  if (!saEmail) return true;
 
   const authHeader = req.headers["authorization"] as string | undefined;
   if (!authHeader?.startsWith("Bearer ")) return false;
@@ -48,9 +45,34 @@ async function verifyOidc(req: Request): Promise<boolean> {
 }
 
 /**
- * Worker endpoint called by Cloud Tasks.
- * Verifies OIDC token, then processes a document using the shared client.
+ * Resolves the page count of the input document.
+ * Uses GCS metadata if available, otherwise downloads and counts.
  */
+async function resolvePageCount(input: DocumentInput): Promise<number> {
+  // Try GCS metadata first (set by upload_document)
+  if (input.gcsUri) {
+    const fromMeta = await getPageCountFromMetadata(input.gcsUri);
+    if (fromMeta > 0) return fromMeta;
+
+    // Fallback: download and count
+    const buffer = await downloadGcsFile(input.gcsUri);
+    return countPdfPages(buffer);
+  }
+
+  if (input.content) {
+    return await countPdfPages(Buffer.from(input.content, "base64"));
+  }
+
+  if (input.url) {
+    const response = await fetch(input.url);
+    if (!response.ok) throw new Error(`Failed to fetch ${input.url}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return countPdfPages(buffer);
+  }
+
+  return 0;
+}
+
 export async function handleWorker(req: Request, res: Response): Promise<void> {
   if (!(await verifyOidc(req))) {
     res.status(401).json({ error: "Unauthorized: invalid OIDC token" });
@@ -63,20 +85,37 @@ export async function handleWorker(req: Request, res: Response): Promise<void> {
   try {
     await updateTask(taskId, { status: "processing" });
 
+    // Get user plan for limits
+    const user = await getUserByApiKeyHash(userId);
+    if (!user) throw new Error("User not found");
+
+    // Count pages before processing
+    const pageCount = await resolvePageCount(input);
+
+    // Check hard limit per document
+    const maxPages = PLAN_MAX_PAGES_PER_DOC[user.plan];
+    if (pageCount > maxPages) {
+      throw new Error(`Document has ${pageCount} pages, exceeds plan limit of ${maxPages}. Upgrade your plan.`);
+    }
+
+    // Check remaining quota
+    const quota = await checkAndResetQuota(userId);
+    const remaining = quota.monthlyPages - quota.pagesUsed;
+    if (pageCount > remaining) {
+      throw new Error(`Document has ${pageCount} pages but you only have ${remaining} pages left this month.`);
+    }
+
+    // Process
     const client = getDocumentAIClient();
     const processorName = PROCESSORS[PROCESSOR_KEYS[toolName]];
-
     if (!processorName) throw new Error(`Processor not configured for ${toolName}`);
 
     const document = await processDocument(client, processorName, input, userId);
-
     const formatter = FORMATTERS[toolName];
     const markdown = formatter(document);
     const pages = splitMarkdownPages(markdown);
 
     const { resultPrefix } = await uploadPagedResult(taskId, pages);
-
-    // Track quota usage
     await incrementPagesUsed(userId, pages.length);
 
     await updateTask(taskId, {

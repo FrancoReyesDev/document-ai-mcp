@@ -27,6 +27,7 @@
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "google-auth-library": "^10.6.2",
+    "pdf-lib": "^1.17.1",
     "zod": "^3.25.76"
   },
   "devDependencies": {

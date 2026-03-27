@@ -60,6 +60,7 @@ export async function enqueueProcessing(params: EnqueueParams): Promise<string> 
   if (SA_EMAIL) {
     (task.httpRequest as Record<string, unknown>).oidcToken = {
       serviceAccountEmail: SA_EMAIL,
+      audience: SERVICE_URL,
     };
   }
 

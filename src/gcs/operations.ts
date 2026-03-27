@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { google } from "@google-cloud/documentai/build/protos/protos.js";
 import { getStorage, BATCH_BUCKET } from "./client.js";
+import { countPdfPages } from "../documentai/count-pages.js";
 
 type IDocument = google.cloud.documentai.v1.IDocument;
 
@@ -146,7 +147,13 @@ export async function uploadDocument(
   const objectPath = `uploads/${userHash}/${uuid}/${name}`;
 
   const bucket = getStorage().bucket(BATCH_BUCKET);
-  await bucket.file(objectPath).save(Buffer.from(content, "base64"), { contentType: mimeType });
+  const buffer = Buffer.from(content, "base64");
+  const pageCount = isPdf(mimeType) ? await countPdfPages(buffer) : 0;
+
+  await bucket.file(objectPath).save(buffer, {
+    contentType: mimeType,
+    metadata: { pageCount: String(pageCount) },
+  });
 
   return `gs://${BATCH_BUCKET}/${objectPath}`;
 }
@@ -193,7 +200,44 @@ export async function uploadDocumentFromUrl(
     throw err;
   }
 
+  // Count pages after upload (we streamed, so read back a small portion)
+  if (isPdf(mimeType)) {
+    try {
+      const [buf] = await gcsFile.download();
+      const pageCount = await countPdfPages(buf);
+      await gcsFile.setMetadata({ metadata: { pageCount: String(pageCount) } });
+    } catch { /* best effort */ }
+  }
+
   return `gs://${BATCH_BUCKET}/${objectPath}`;
+}
+
+/**
+ * Reads the pageCount custom metadata from a GCS object.
+ * Returns 0 if not available.
+ */
+export async function getPageCountFromMetadata(gcsUri: string): Promise<number> {
+  const path = gcsUri.replace(`gs://${BATCH_BUCKET}/`, "");
+  try {
+    const [metadata] = await getStorage().bucket(BATCH_BUCKET).file(path).getMetadata();
+    const count = metadata?.metadata?.pageCount;
+    return count ? Number(count) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Downloads a file from GCS. Returns the full buffer.
+ */
+export async function downloadGcsFile(gcsUri: string): Promise<Buffer> {
+  const path = gcsUri.replace(`gs://${BATCH_BUCKET}/`, "");
+  const [buffer] = await getStorage().bucket(BATCH_BUCKET).file(path).download();
+  return buffer;
+}
+
+function isPdf(mimeType: string): boolean {
+  return mimeType === "application/pdf";
 }
 
 function mimeTypeToExt(mimeType: string): string {

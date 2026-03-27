@@ -54,3 +54,9 @@ export const PLAN_QUOTAS: Record<PlanType, number> = {
   basic: 1000,
   pro: 10000,
 };
+
+export const PLAN_MAX_PAGES_PER_DOC: Record<PlanType, number> = {
+  free: 50,
+  basic: 500,
+  pro: 2000,
+};

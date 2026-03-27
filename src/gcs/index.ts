@@ -9,4 +9,6 @@ export {
   downloadPages,
   uploadDocument,
   uploadDocumentFromUrl,
+  getPageCountFromMetadata,
+  downloadGcsFile,
 } from "./operations.js";
