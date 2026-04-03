@@ -1,18 +1,23 @@
-export type PlanType = "free" | "basic" | "pro";
 export type TaskStatus = "queued" | "processing" | "completed" | "failed";
 export type ToolName = "ocr_document" | "parse_form" | "parse_layout";
 
-export interface QuotaInfo {
-  monthlyPages: number;
-  currentMonth: string;
-  pagesUsed: number;
+/** Document AI hard limit — independent of user credits. */
+export const MAX_PAGES_PER_DOC = 2_000;
+
+/** Free pages granted on account creation. */
+export const FREE_PAGES = 100;
+
+export interface CreditInfo {
+  pagesAvailable: number;
+  pagesUsedTotal: number;
+  pagesUsedThisMonth: number;
+  currentMonth: string; // "YYYY-MM"
 }
 
 export interface UserRecord {
   apiKeyHash: string;
   email: string;
-  plan: PlanType;
-  quota: QuotaInfo;
+  credits: CreditInfo;
   createdAt: Date;
   lastUsedAt: Date;
 }
@@ -20,8 +25,7 @@ export interface UserRecord {
 export interface UserContext {
   apiKeyHash: string;
   email: string;
-  plan: PlanType;
-  quota: QuotaInfo;
+  credits: CreditInfo;
 }
 
 export interface DocumentInput {
@@ -48,15 +52,3 @@ export interface ProcessingTask {
   createdAt: Date;
   completedAt?: Date;
 }
-
-export const PLAN_QUOTAS: Record<PlanType, number> = {
-  free: 100,
-  basic: 1000,
-  pro: 10000,
-};
-
-export const PLAN_MAX_PAGES_PER_DOC: Record<PlanType, number> = {
-  free: 50,
-  basic: 500,
-  pro: 2000,
-};

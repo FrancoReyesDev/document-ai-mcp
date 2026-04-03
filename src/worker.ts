@@ -1,11 +1,11 @@
 import type { Request, Response } from "express";
 import { OAuth2Client } from "google-auth-library";
-import { getUserByApiKeyHash, updateTask, incrementPagesUsed, checkAndResetQuota } from "./storage/index.js";
+import { getUserByApiKeyHash, updateTask, consumePages, getCredits } from "./storage/index.js";
 import { getDocumentAIClient, PROCESSORS, processDocument, formatOcrToMarkdown, formatFormToMarkdown, formatLayoutToMarkdown, countPdfPages } from "./documentai/index.js";
 import { splitMarkdownPages } from "./documentai/split-pages.js";
 import { uploadPagedResult, getPageCountFromMetadata, downloadGcsFile } from "./gcs/index.js";
 import type { ToolName, DocumentInput } from "./types.js";
-import { PLAN_MAX_PAGES_PER_DOC } from "./types.js";
+import { MAX_PAGES_PER_DOC } from "./types.js";
 
 const oidcClient = new OAuth2Client();
 
@@ -49,12 +49,10 @@ async function verifyOidc(req: Request): Promise<boolean> {
  * Uses GCS metadata if available, otherwise downloads and counts.
  */
 async function resolvePageCount(input: DocumentInput): Promise<number> {
-  // Try GCS metadata first (set by upload_document)
   if (input.gcsUri) {
     const fromMeta = await getPageCountFromMetadata(input.gcsUri);
     if (fromMeta > 0) return fromMeta;
 
-    // Fallback: download and count
     const buffer = await downloadGcsFile(input.gcsUri);
     return countPdfPages(buffer);
   }
@@ -85,24 +83,20 @@ export async function handleWorker(req: Request, res: Response): Promise<void> {
   try {
     await updateTask(taskId, { status: "processing" });
 
-    // Get user plan for limits
     const user = await getUserByApiKeyHash(userId);
     if (!user) throw new Error("User not found");
 
-    // Count pages before processing
     const pageCount = await resolvePageCount(input);
 
-    // Check hard limit per document
-    const maxPages = PLAN_MAX_PAGES_PER_DOC[user.plan];
-    if (pageCount > maxPages) {
-      throw new Error(`Document has ${pageCount} pages, exceeds plan limit of ${maxPages}. Upgrade your plan.`);
+    // Hard limit per document (Document AI constraint)
+    if (pageCount > MAX_PAGES_PER_DOC) {
+      throw new Error(`Document has ${pageCount} pages, exceeds maximum of ${MAX_PAGES_PER_DOC} pages per document.`);
     }
 
-    // Check remaining quota
-    const quota = await checkAndResetQuota(userId);
-    const remaining = quota.monthlyPages - quota.pagesUsed;
-    if (pageCount > remaining) {
-      throw new Error(`Document has ${pageCount} pages but you only have ${remaining} pages left this month.`);
+    // Check available credits
+    const credits = await getCredits(userId);
+    if (pageCount > credits.pagesAvailable) {
+      throw new Error(`Document has ${pageCount} pages but you only have ${credits.pagesAvailable} pages available.`);
     }
 
     // Process
@@ -116,7 +110,7 @@ export async function handleWorker(req: Request, res: Response): Promise<void> {
     const pages = splitMarkdownPages(markdown);
 
     const { resultPrefix } = await uploadPagedResult(taskId, pages);
-    await incrementPagesUsed(userId, pages.length);
+    await consumePages(userId, pages.length);
 
     await updateTask(taskId, {
       status: "completed",

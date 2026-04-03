@@ -4,12 +4,11 @@ import {
   createUser,
   getUserByEmail,
   deleteUser,
-  updateUserPlan,
+  addPagesByEmail,
   rotateUserKey,
   getUserTasks,
 } from "./storage/index.js";
-import type { PlanType } from "./types.js";
-import { PLAN_QUOTAS } from "./types.js";
+import { FREE_PAGES } from "./types.js";
 
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? "").split(",").filter(Boolean);
 
@@ -17,7 +16,7 @@ export const adminRouter: ReturnType<typeof Router> = Router();
 
 // Create user
 adminRouter.post("/users", async (req, res) => {
-  const { email, plan } = req.body as { email?: string; plan?: PlanType };
+  const { email, initialPages } = req.body as { email?: string; initialPages?: number };
 
   if (!email) {
     res.status(400).json({ error: "Missing email" });
@@ -30,18 +29,13 @@ adminRouter.post("/users", async (req, res) => {
     return;
   }
 
-  const effectivePlan: PlanType = plan ?? (ADMIN_EMAILS.includes(email) ? "pro" : "free");
+  const pages = initialPages ?? (ADMIN_EMAILS.includes(email) ? 10_000 : FREE_PAGES);
   const apiKey = generateApiKey();
   const apiKeyHash = hashApiKey(apiKey);
 
-  await createUser(apiKeyHash, email, effectivePlan);
+  await createUser(apiKeyHash, email, pages);
 
-  res.status(201).json({
-    apiKey,
-    email,
-    plan: effectivePlan,
-    monthlyPages: PLAN_QUOTAS[effectivePlan],
-  });
+  res.status(201).json({ apiKey, email, pagesAvailable: pages });
 });
 
 // Get user info
@@ -54,14 +48,13 @@ adminRouter.get("/users/:email", async (req, res) => {
 
   res.json({
     email: user.email,
-    plan: user.plan,
-    quota: user.quota,
+    credits: user.credits,
     createdAt: user.createdAt,
     lastUsedAt: user.lastUsedAt,
   });
 });
 
-// Get user usage (quota + recent tasks)
+// Get user usage (credits + recent tasks)
 adminRouter.get("/users/:email/usage", async (req, res) => {
   const user = await getUserByEmail(req.params.email);
   if (!user) {
@@ -72,7 +65,7 @@ adminRouter.get("/users/:email/usage", async (req, res) => {
   const tasks = await getUserTasks(user.apiKeyHash);
 
   res.json({
-    quota: user.quota,
+    credits: user.credits,
     recentTasks: tasks.map((t) => ({
       taskId: t.taskId,
       toolName: t.toolName,
@@ -97,21 +90,21 @@ adminRouter.post("/users/:email/rotate-key", async (req, res) => {
   res.json({ apiKey: newApiKey });
 });
 
-// Upgrade plan
-adminRouter.post("/users/:email/upgrade", async (req, res) => {
-  const { plan } = req.body as { plan?: PlanType };
-  if (!plan || !PLAN_QUOTAS[plan]) {
-    res.status(400).json({ error: "Invalid plan. Options: free, basic, pro" });
+// Add pages (called by web app after payment)
+adminRouter.post("/users/:email/add-pages", async (req, res) => {
+  const { pages } = req.body as { pages?: number };
+  if (!pages || pages <= 0) {
+    res.status(400).json({ error: "Invalid pages amount. Must be a positive number." });
     return;
   }
 
-  const updated = await updateUserPlan(req.params.email, plan);
-  if (!updated) {
+  const newBalance = await addPagesByEmail(req.params.email, pages);
+  if (newBalance === null) {
     res.status(404).json({ error: "User not found" });
     return;
   }
 
-  res.json({ plan, monthlyPages: PLAN_QUOTAS[plan] });
+  res.json({ pagesAdded: pages, pagesAvailable: newBalance });
 });
 
 // Delete user

@@ -18,7 +18,7 @@ export function registerOcrDocument(server: McpServer, userContext?: UserContext
           userId: userContext.apiKeyHash,
           toolName: "ocr_document",
           input: { content, mimeType, gcsUri, url },
-          quota: userContext.quota,
+          credits: userContext.credits,
         });
 
         return {

@@ -47,8 +47,7 @@ export async function apiKeyAuth(
   req.userContext = {
     apiKeyHash: user.apiKeyHash,
     email: user.email,
-    plan: user.plan,
-    quota: user.quota,
+    credits: user.credits,
   };
 
   next();

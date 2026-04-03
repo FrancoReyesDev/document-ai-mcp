@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { getTasksClient, QUEUE_NAME } from "./client.js";
-import { createTask, checkAndResetQuota } from "../storage/index.js";
-import type { DocumentInput, QuotaInfo } from "../types.js";
+import { createTask, getCredits } from "../storage/index.js";
+import type { DocumentInput, CreditInfo } from "../types.js";
 
 const SERVICE_URL = process.env.SERVICE_URL ?? "";
 const SA_EMAIL = process.env.WORKER_SA_EMAIL ?? "";
@@ -10,7 +10,7 @@ export interface EnqueueParams {
   userId: string;
   toolName: "ocr_document" | "parse_form" | "parse_layout";
   input: DocumentInput;
-  quota: QuotaInfo;
+  credits: CreditInfo;
 }
 
 /** Removes undefined values that Firestore rejects. */
@@ -19,14 +19,13 @@ function cleanInput(input: DocumentInput): DocumentInput {
 }
 
 /**
- * Checks quota, creates task in Firestore, enqueues in Cloud Tasks.
- * Throws if quota exceeded.
+ * Checks credits, creates task in Firestore, enqueues in Cloud Tasks.
+ * Throws if no pages available.
  */
 export async function enqueueProcessing(params: EnqueueParams): Promise<string> {
-  // Check and auto-reset quota
-  const quota = await checkAndResetQuota(params.userId);
-  if (quota.pagesUsed >= quota.monthlyPages) {
-    throw new Error(`Quota exceeded: ${quota.pagesUsed}/${quota.monthlyPages} pages used this month. Upgrade your plan.`);
+  const credits = await getCredits(params.userId);
+  if (credits.pagesAvailable <= 0) {
+    throw new Error("No pages available. Buy more pages at your dashboard.");
   }
 
   const taskId = crypto.randomUUID();

@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { generateApiKey, hashApiKey, adminAuth } from "./auth/index.js";
 import { createUser } from "./storage/index.js";
-import type { PlanType } from "./types.js";
+import { FREE_PAGES } from "./types.js";
 
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? "").split(",").filter(Boolean);
 
@@ -16,16 +16,15 @@ export function registerRoutes(app: Express): void {
     }
 
     try {
-      const plan: PlanType = ADMIN_EMAILS.includes(email) ? "pro" : "free";
+      const initialPages = ADMIN_EMAILS.includes(email) ? 10_000 : FREE_PAGES;
       const apiKey = generateApiKey();
       const apiKeyHash = hashApiKey(apiKey);
 
-      await createUser(apiKeyHash, email, plan);
+      await createUser(apiKeyHash, email, initialPages);
 
       res.status(201).json({
         apiKey,
-        plan,
-        monthlyPages: plan === "pro" ? 10000 : 100,
+        pagesAvailable: initialPages,
         message: "Registration successful.",
       });
     } catch (error) {

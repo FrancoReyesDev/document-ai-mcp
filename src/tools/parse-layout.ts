@@ -18,7 +18,7 @@ export function registerParseLayout(server: McpServer, userContext?: UserContext
           userId: userContext.apiKeyHash,
           toolName: "parse_layout",
           input: { content, mimeType, gcsUri, url },
-          quota: userContext.quota,
+          credits: userContext.credits,
         });
 
         return {

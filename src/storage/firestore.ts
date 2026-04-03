@@ -1,6 +1,6 @@
 import { Firestore } from "@google-cloud/firestore";
-import type { UserRecord, ProcessingTask, QuotaInfo, PlanType } from "../types.js";
-import { PLAN_QUOTAS } from "../types.js";
+import type { UserRecord, ProcessingTask, CreditInfo } from "../types.js";
+import { FREE_PAGES } from "../types.js";
 
 const USERS = "users";
 const TASKS = "tasks";
@@ -16,59 +16,90 @@ function getDb(): Firestore {
   return db;
 }
 
-// --- User CRUD ---
+// --- Helpers ---
 
 function currentMonth(): string {
-  return new Date().toISOString().slice(0, 7); // "2026-03"
+  return new Date().toISOString().slice(0, 7); // "2026-04"
 }
 
-export async function getUserByApiKeyHash(apiKeyHash: string): Promise<UserRecord | null> {
-  const doc = await getDb().collection(USERS).doc(apiKeyHash).get();
-  if (!doc.exists) return null;
+function defaultCredits(initialPages: number): CreditInfo {
+  return { pagesAvailable: initialPages, pagesUsedTotal: 0, pagesUsedThisMonth: 0, currentMonth: currentMonth() };
+}
 
-  const data = doc.data()!;
+function parseUserDoc(data: FirebaseFirestore.DocumentData): UserRecord {
   return {
     apiKeyHash: data.apiKeyHash,
     email: data.email,
-    plan: data.plan ?? "free",
-    quota: data.quota ?? { monthlyPages: PLAN_QUOTAS.free, currentMonth: currentMonth(), pagesUsed: 0 },
+    credits: data.credits ?? defaultCredits(FREE_PAGES),
     createdAt: data.createdAt?.toDate() ?? new Date(),
     lastUsedAt: data.lastUsedAt?.toDate() ?? new Date(),
   };
 }
 
-export async function createUser(apiKeyHash: string, email: string, plan: PlanType = "free"): Promise<void> {
+// --- User CRUD ---
+
+export async function getUserByApiKeyHash(apiKeyHash: string): Promise<UserRecord | null> {
+  const doc = await getDb().collection(USERS).doc(apiKeyHash).get();
+  if (!doc.exists) return null;
+  return parseUserDoc(doc.data()!);
+}
+
+export async function createUser(apiKeyHash: string, email: string, initialPages: number = FREE_PAGES): Promise<void> {
   await getDb().collection(USERS).doc(apiKeyHash).set({
     apiKeyHash,
     email,
-    plan,
-    quota: { monthlyPages: PLAN_QUOTAS[plan], currentMonth: currentMonth(), pagesUsed: 0 },
+    credits: defaultCredits(initialPages),
     createdAt: new Date(),
     lastUsedAt: new Date(),
   });
 }
 
-export async function checkAndResetQuota(apiKeyHash: string): Promise<QuotaInfo> {
+// --- Credit operations ---
+
+export async function getCredits(apiKeyHash: string): Promise<CreditInfo> {
   const ref = getDb().collection(USERS).doc(apiKeyHash);
   const doc = await ref.get();
-  const data = doc.data()!;
-  const quota: QuotaInfo = data.quota;
+  const user = parseUserDoc(doc.data()!);
+  let credits = user.credits;
 
-  // Auto-reset if new month
-  if (quota.currentMonth !== currentMonth()) {
-    const resetQuota: QuotaInfo = { ...quota, currentMonth: currentMonth(), pagesUsed: 0 };
-    await ref.update({ quota: resetQuota });
-    return resetQuota;
+  // Reset monthly counter if new month (stats only, does NOT affect pagesAvailable)
+  if (credits.currentMonth !== currentMonth()) {
+    credits = { ...credits, currentMonth: currentMonth(), pagesUsedThisMonth: 0 };
+    await ref.update({ credits });
   }
 
-  return quota;
+  return credits;
 }
 
-export async function incrementPagesUsed(apiKeyHash: string, pages: number): Promise<void> {
+export async function consumePages(apiKeyHash: string, pages: number): Promise<void> {
   const ref = getDb().collection(USERS).doc(apiKeyHash);
   const doc = await ref.get();
-  const quota: QuotaInfo = doc.data()!.quota;
-  await ref.update({ quota: { ...quota, pagesUsed: quota.pagesUsed + pages } });
+  const user = parseUserDoc(doc.data()!);
+  let credits = user.credits;
+
+  // Reset monthly counter if new month
+  if (credits.currentMonth !== currentMonth()) {
+    credits = { ...credits, currentMonth: currentMonth(), pagesUsedThisMonth: 0 };
+  }
+
+  await ref.update({
+    credits: {
+      ...credits,
+      pagesAvailable: credits.pagesAvailable - pages,
+      pagesUsedTotal: credits.pagesUsedTotal + pages,
+      pagesUsedThisMonth: credits.pagesUsedThisMonth + pages,
+    },
+    lastUsedAt: new Date(),
+  });
+}
+
+export async function addPages(apiKeyHash: string, pages: number): Promise<number> {
+  const ref = getDb().collection(USERS).doc(apiKeyHash);
+  const doc = await ref.get();
+  const user = parseUserDoc(doc.data()!);
+  const newAvailable = user.credits.pagesAvailable + pages;
+  await ref.update({ "credits.pagesAvailable": newAvailable });
+  return newAvailable;
 }
 
 // --- Task CRUD ---
@@ -97,15 +128,7 @@ export async function updateTask(taskId: string, updates: Partial<ProcessingTask
 export async function getUserByEmail(email: string): Promise<UserRecord | null> {
   const snapshot = await getDb().collection(USERS).where("email", "==", email).limit(1).get();
   if (snapshot.empty) return null;
-  const data = snapshot.docs[0].data();
-  return {
-    apiKeyHash: data.apiKeyHash,
-    email: data.email,
-    plan: data.plan ?? "free",
-    quota: data.quota ?? { monthlyPages: PLAN_QUOTAS.free, currentMonth: currentMonth(), pagesUsed: 0 },
-    createdAt: data.createdAt?.toDate() ?? new Date(),
-    lastUsedAt: data.lastUsedAt?.toDate() ?? new Date(),
-  };
+  return parseUserDoc(snapshot.docs[0].data());
 }
 
 export async function deleteUser(email: string): Promise<boolean> {
@@ -115,18 +138,13 @@ export async function deleteUser(email: string): Promise<boolean> {
   return true;
 }
 
-export async function updateUserPlan(email: string, plan: PlanType): Promise<boolean> {
+export async function addPagesByEmail(email: string, pages: number): Promise<number | null> {
   const user = await getUserByEmail(email);
-  if (!user) return false;
-  const ref = getDb().collection(USERS).doc(user.apiKeyHash);
-  await ref.update({ plan, "quota.monthlyPages": PLAN_QUOTAS[plan] });
-  return true;
+  if (!user) return null;
+  return addPages(user.apiKeyHash, pages);
 }
 
-export async function rotateUserKey(
-  email: string,
-  newApiKeyHash: string,
-): Promise<boolean> {
+export async function rotateUserKey(email: string, newApiKeyHash: string): Promise<boolean> {
   const user = await getUserByEmail(email);
   if (!user) return false;
 
@@ -134,7 +152,6 @@ export async function rotateUserKey(
   const oldRef = db.collection(USERS).doc(user.apiKeyHash);
   const oldData = (await oldRef.get()).data()!;
 
-  // Create new doc with new hash, delete old
   await db.collection(USERS).doc(newApiKeyHash).set({
     ...oldData,
     apiKeyHash: newApiKeyHash,

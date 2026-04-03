@@ -1,61 +1,54 @@
 import { describe, it, expect } from "vitest";
-import { PLAN_QUOTAS, PLAN_MAX_PAGES_PER_DOC } from "./types.js";
-import type { PlanType } from "./types.js";
+import { MAX_PAGES_PER_DOC, FREE_PAGES } from "./types.js";
+import type { CreditInfo } from "./types.js";
 
-describe("Plan limits", () => {
-  const plans: PlanType[] = ["free", "basic", "pro"];
-
-  it("every plan has a monthly quota", () => {
-    for (const plan of plans) {
-      expect(PLAN_QUOTAS[plan]).toBeGreaterThan(0);
-    }
+describe("Credits system", () => {
+  it("MAX_PAGES_PER_DOC is Document AI hard limit", () => {
+    expect(MAX_PAGES_PER_DOC).toBe(2000);
   });
 
-  it("every plan has a max pages per document", () => {
-    for (const plan of plans) {
-      expect(PLAN_MAX_PAGES_PER_DOC[plan]).toBeGreaterThan(0);
-    }
+  it("FREE_PAGES is 100", () => {
+    expect(FREE_PAGES).toBe(100);
   });
 
-  it("quotas increase with plan tier", () => {
-    expect(PLAN_QUOTAS.free).toBeLessThan(PLAN_QUOTAS.basic);
-    expect(PLAN_QUOTAS.basic).toBeLessThan(PLAN_QUOTAS.pro);
+  it("document exceeds max pages per doc", () => {
+    const pageCount = 2500;
+    expect(pageCount > MAX_PAGES_PER_DOC).toBe(true);
   });
 
-  it("max pages per doc increase with plan tier", () => {
-    expect(PLAN_MAX_PAGES_PER_DOC.free).toBeLessThan(PLAN_MAX_PAGES_PER_DOC.basic);
-    expect(PLAN_MAX_PAGES_PER_DOC.basic).toBeLessThan(PLAN_MAX_PAGES_PER_DOC.pro);
+  it("not enough pages available", () => {
+    const credits: CreditInfo = { pagesAvailable: 30, pagesUsedTotal: 70, pagesUsedThisMonth: 70, currentMonth: "2026-04" };
+    const pageCount = 50;
+    expect(pageCount > credits.pagesAvailable).toBe(true);
   });
 
-  it("free plan: 100 pages/month, 50 per doc", () => {
-    expect(PLAN_QUOTAS.free).toBe(100);
-    expect(PLAN_MAX_PAGES_PER_DOC.free).toBe(50);
-  });
-
-  it("pro max per doc = 2000 (Document AI limit)", () => {
-    expect(PLAN_MAX_PAGES_PER_DOC.pro).toBe(2000);
-  });
-
-  it("quota validation: document exceeds plan limit", () => {
-    const pageCount = 100;
-    const maxForFree = PLAN_MAX_PAGES_PER_DOC.free; // 50
-    expect(pageCount > maxForFree).toBe(true);
-  });
-
-  it("quota validation: not enough remaining pages", () => {
+  it("within limits passes", () => {
+    const credits: CreditInfo = { pagesAvailable: 200, pagesUsedTotal: 300, pagesUsedThisMonth: 50, currentMonth: "2026-04" };
     const pageCount = 10;
-    const pagesUsed = 95;
-    const monthlyPages = PLAN_QUOTAS.free; // 100
-    const remaining = monthlyPages - pagesUsed; // 5
-    expect(pageCount > remaining).toBe(true);
+    expect(pageCount <= credits.pagesAvailable).toBe(true);
+    expect(pageCount <= MAX_PAGES_PER_DOC).toBe(true);
   });
 
-  it("quota validation: within limits passes", () => {
-    const pageCount = 30;
-    const pagesUsed = 50;
-    const monthlyPages = PLAN_QUOTAS.free; // 100
-    const remaining = monthlyPages - pagesUsed; // 50
-    expect(pageCount <= PLAN_MAX_PAGES_PER_DOC.free).toBe(true);
-    expect(pageCount <= remaining).toBe(true);
+  it("consumption decrements available, increments used", () => {
+    const credits: CreditInfo = { pagesAvailable: 200, pagesUsedTotal: 300, pagesUsedThisMonth: 50, currentMonth: "2026-04" };
+    const consumed = 10;
+    const updated: CreditInfo = {
+      ...credits,
+      pagesAvailable: credits.pagesAvailable - consumed,
+      pagesUsedTotal: credits.pagesUsedTotal + consumed,
+      pagesUsedThisMonth: credits.pagesUsedThisMonth + consumed,
+    };
+    expect(updated.pagesAvailable).toBe(190);
+    expect(updated.pagesUsedTotal).toBe(310);
+    expect(updated.pagesUsedThisMonth).toBe(60);
+  });
+
+  it("top-up increments available only", () => {
+    const credits: CreditInfo = { pagesAvailable: 50, pagesUsedTotal: 450, pagesUsedThisMonth: 200, currentMonth: "2026-04" };
+    const added = 500;
+    const updated: CreditInfo = { ...credits, pagesAvailable: credits.pagesAvailable + added };
+    expect(updated.pagesAvailable).toBe(550);
+    expect(updated.pagesUsedTotal).toBe(450);
+    expect(updated.pagesUsedThisMonth).toBe(200);
   });
 });

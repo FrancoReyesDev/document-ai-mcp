@@ -18,7 +18,7 @@ export function registerParseForm(server: McpServer, userContext?: UserContext):
           userId: userContext.apiKeyHash,
           toolName: "parse_form",
           input: { content, mimeType, gcsUri, url },
-          quota: userContext.quota,
+          credits: userContext.credits,
         });
 
         return {
