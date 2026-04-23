@@ -12,7 +12,7 @@ export function registerGetQuota(server: McpServer, userContext?: UserContext): 
         return { content: [{ type: "text" as const, text: "Error: not authenticated" }], isError: true };
       }
 
-      const credits = await getCredits(userContext.apiKeyHash);
+      const credits = await getCredits(userContext.userId);
 
       return {
         content: [{

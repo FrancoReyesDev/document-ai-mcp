@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { uploadDocument, uploadDocumentFromUrl } from "../gcs/index.js";
+import { getCredits } from "../storage/index.js";
 import type { UserContext } from "../types.js";
 
 export function registerUploadDocument(server: McpServer, userContext?: UserContext): void {
@@ -18,13 +19,27 @@ export function registerUploadDocument(server: McpServer, userContext?: UserCont
         return { content: [{ type: "text" as const, text: "Error: not authenticated" }], isError: true };
       }
 
+      // Sin créditos no tiene sentido subir — no podría procesar el doc después.
+      // Evitamos storage waste y tratamos la situación con un error claro.
+      const credits = await getCredits(userContext.userId);
+      if (credits.pagesAvailable <= 0) {
+        const dashboardUrl = `${process.env.WEB_URL ?? ""}/dashboard`;
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Error: no pages available. You've used your beta allowance. Visit ${dashboardUrl} to request more access.`,
+          }],
+          isError: true,
+        };
+      }
+
       try {
         let gcsUri: string;
 
         if (url) {
-          gcsUri = await uploadDocumentFromUrl(userContext.apiKeyHash, url, fileName);
+          gcsUri = await uploadDocumentFromUrl(userContext.userId, url, fileName);
         } else if (content && mimeType) {
-          gcsUri = await uploadDocument(userContext.apiKeyHash, content, mimeType, fileName);
+          gcsUri = await uploadDocument(userContext.userId, content, mimeType, fileName);
         } else {
           return {
             content: [{ type: "text" as const, text: "Error: provide either url or content+mimeType" }],

@@ -2,6 +2,30 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getTask } from "../storage/index.js";
 import { downloadMetadata, downloadPages } from "../gcs/index.js";
+import type { ProcessingTask } from "../types.js";
+
+/**
+ * Heurística de latencia esperada:
+ * - Online (≤15 páginas): ~2s base + ~500ms/page
+ * - Batch (>15 páginas): ~3s base + ~1.5s/page (LRO de Document AI)
+ * - Queued (sin startedAt aún): asumimos 1-2s de arranque.
+ *
+ * Devuelve ms a esperar antes del próximo poll (clamp 500ms mínimo).
+ */
+function estimateRetryMs(task: ProcessingTask): number {
+  const pages = task.pageCount ?? 1;
+  const isBatch = pages > 15;
+  const expectedTotal = isBatch ? 3000 + pages * 1500 : 2000 + pages * 500;
+
+  if (!task.startedAt) {
+    // Aún en queue — esperar un poco para que el worker levante.
+    return Math.min(2000, expectedTotal);
+  }
+
+  const elapsed = Date.now() - task.startedAt.getTime();
+  const remaining = expectedTotal - elapsed;
+  return Math.max(500, remaining);
+}
 
 export function registerGetResult(server: McpServer): void {
   server.tool(
@@ -21,7 +45,13 @@ export function registerGetResult(server: McpServer): void {
         }
 
         if (task.status === "queued" || task.status === "processing") {
-          return text(`Task ${taskId} is ${task.status}. Please wait and call get_result again in a few seconds.`);
+          const retryMs = estimateRetryMs(task);
+          const detail = task.pageCount
+            ? `${task.pageCount} page${task.pageCount === 1 ? "" : "s"}, ${task.pageCount > 15 ? "batch" : "online"} mode`
+            : "page count pending";
+          return text(
+            `Task ${taskId} is ${task.status} (${detail}). Call get_result again in ~${retryMs}ms.`,
+          );
         }
 
         if (task.status === "failed") {

@@ -1,77 +1,130 @@
 # Document OCR MCP
 
-Enterprise document processing for AI agents via [MCP](https://modelcontextprotocol.io). Connect Google Document AI to Claude, Perplexity, or any LLM — extract text, parse forms, analyze layouts with industrial-grade OCR.
+> An OAuth 2.1 MCP server that exposes **Google Document AI** to any LLM — OCR, form parsing, and layout analysis returned as clean Markdown, with zero context tokens burned on vision.
 
-> Faster, cheaper, and more accurate than LLM vision. Up to 2,000 pages per document.
+[![MCP 2025-06-18](https://img.shields.io/badge/MCP-2025--06--18-black)](https://modelcontextprotocol.io) [![OAuth 2.1](https://img.shields.io/badge/OAuth-2.1-black)](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1) [![ISC](https://img.shields.io/badge/license-ISC-black)](./LICENSE)
+
+---
 
 ## Why
 
-LLM vision is slow, expensive, and imprecise for documents. Google Document AI is purpose-built for OCR with 99%+ accuracy. This MCP server bridges the gap — any LLM can process documents at enterprise quality without vision tokens.
+LLM vision works for documents, but it's expensive, slow, and clumsy. A multi-step agent re-ingests page images on every turn — a 10-page PDF at 5 steps burns ~55k tokens before you get to the real work. Document AI does OCR right (99%+ accuracy on real-world docs), returns structure, and costs the same or less. This MCP puts that pipeline one prompt away from your agent, over plain OAuth, with no API keys to rotate.
+
+## Use it in your MCP client
+
+Any OAuth-capable MCP client works (Claude Desktop, Perplexity, Claude Code). Point it at the server URL — your client opens a browser, you sign in with the configured IdP, done. No API keys to paste.
+
+Claude Desktop example (`claude_desktop_config.json`):
+```jsonc
+{
+  "mcpServers": {
+    "document-ai": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://<your-deployment>.run.app/mcp"],
+      "type": "stdio"
+    }
+  }
+}
+```
+
+The code grants new users a configurable default of pages on signup (`SIGNUP_FREE_PAGES`, currently `100`). Admins of a deployment load more pages by editing Firestore — see [Admin runbook](#admin-runbook).
+
+Want to run your own deployment? See [Self-hosting](#self-hosting).
 
 ## Tools
 
-| Tool | Description |
-|------|-------------|
-| `ocr_document` | Extract text from PDFs/images → Markdown |
-| `parse_form` | Extract form fields → key-value Markdown table |
-| `parse_layout` | Analyze structure → headings, tables, lists, reading order |
-| `get_result` | Check task status, retrieve paginated results |
-| `upload_document` | Upload document to storage (base64 or URL) |
-| `get_quota` | Check plan, pages used, remaining |
+| Tool | Purpose | Returns |
+|---|---|---|
+| `ocr_document` | Extract text from a PDF / image | `taskId` — poll with `get_result` |
+| `parse_form` | Extract key-value pairs as a Markdown table | `taskId` |
+| `parse_layout` | Analyze structure (headings, tables, reading order) | `taskId` |
+| `get_result` | Check task status / fetch page(s) | Metadata or Markdown |
+| `upload_document` | Stage a document to GCS and get a reusable `gcsUri` | `gcsUri` |
+| `get_quota` | Your balance and usage | `pagesAvailable` / used stats |
 
-## Quick start
-
-### 1. Connect
-
-```
-URL:       https://your-server.run.app/mcp
-Auth:      API Key (Authorization: Bearer <key>)
-Transport: Streamable HTTP
-```
-
-Works with Claude Desktop, Perplexity, Claude Code, or any MCP-compatible client.
-
-### 2. Process
-
-```
-You: "Extract the text from this contract"
-
-LLM → ocr_document({ url: "https://..." })
-    → Task ID: abc123
-
-LLM → get_result({ taskId: "abc123" })
-    → "3 pages, 1410 characters"
-
-LLM → get_result({ taskId: "abc123", pageFrom: 1, pageTo: 3 })
-    → "## Page 1\nCONTRATO DE LOCACION..."
-```
-
-All processing is async via Cloud Tasks. Documents up to 15 pages process online (~3s), larger ones automatically batch process.
+Processing tools accept `{ content, mimeType }` (inline base64), `{ gcsUri }` (pre-uploaded), or `{ url }` (remote). Processing is async via Cloud Tasks; online mode runs docs ≤15 pages in ~3 s, and falls back to batch for longer ones (up to 2,000 pages). `get_result` returns an `ETA in ms` so agents don't idle wait.
 
 ## Architecture
 
 ```
-LLM ──MCP──→ Cloud Run ──→ Document AI
-                │
-                ├── Cloud Tasks (async queue, rate limited)
-                ├── Firestore (users, tasks, quota)
-                └── Cloud Storage (documents, results)
+ ┌───────────────────┐       OAuth 2.1       ┌────────────────────┐
+ │  MCP client       │ ───────────────────── │  GitHub (IdP)       │
+ │  (Claude, Perp.)  │                       └────────────────────┘
+ └────────┬──────────┘                                  ▲
+          │ Bearer                              identity delegation
+          ▼                                            │
+ ┌────────────────────────────────────────────────────┴─────┐
+ │                Cloud Run — document-ai-mcp                │
+ │                                                           │
+ │  AS (oidc-provider)    RS (/mcp, /me, /me/usage)          │
+ │         │                        │                        │
+ │         ▼                        ▼                        │
+ │  Firestore: users, tasks, oidc_* (tokens/grants/...)      │
+ │                                                           │
+ │  /worker  ← Cloud Tasks (OIDC)   → Document AI            │
+ │  /cleanup ← Cloud Scheduler (OIDC)                        │
+ └───────────────────────────────────────────────────────────┘
+
+ GCS: batch/{u}/{uuid}/  → 1d    (batch intermediates)
+      uploads/{u}/{uuid}/ → 30d  (staged by upload_document)
+      results/{taskId}/   → 30d  (page-N.md + metadata.json)
 ```
 
-- **Async processing**: Cloud Tasks queue with 5 concurrent / 2 per second rate limit
-- **Paginated results**: Each page stored separately — LLM requests only what it needs
-- **Page counting**: pdf-lib validates page count before processing (prevents cost blowouts)
-- **Quota system**: Monthly page limits per plan with auto-reset
-- **Batch fallback**: Online processing (≤15 pages) with transparent fallback to batch (≤2,000 pages)
+- **Server is its own Authorization Server** (via [`oidc-provider`](https://github.com/panva/node-oidc-provider)). Tokens are opaque, stored in Firestore with TTL. Identity is delegated to GitHub; no passwords, no API keys.
+- **Processing is async.** Clients enqueue a task and poll. Online mode for short docs (~3 s), automatic batch fallback for long ones (up to 2,000 pages).
+- **Results are paginated and cached.** Each page lands in GCS as its own Markdown file; the agent fetches only the pages it needs.
+- **Credits are decremented atomically** when processing completes. Users see remaining balance via `get_quota` or the web dashboard.
+
+## Admin runbook
+
+### Load pages to a user
+
+The server reads credits from Firestore — so admin ops are just Firestore edits. No admin HTTP API, no shared-secret endpoints.
+
+Via Firebase Console (easiest):
+1. Open `https://console.firebase.google.com/project/<your-gcp-project>/firestore`
+2. Navigate to `users/<userId>` (find by email with the query tool)
+3. Edit `credits.pagesAvailable` to whatever value you want
+
+Via gcloud (scriptable):
+```bash
+gcloud firestore documents update "users/<userId>" \
+  --update-mask="credits.pagesAvailable" \
+  --data='{"credits":{"pagesAvailable":1000000000}}' \
+  --project=<your-gcp-project>
+```
+
+Or from Node with the Admin SDK:
+```js
+const { Firestore } = require("@google-cloud/firestore");
+const db = new Firestore({ projectId: "<your-gcp-project>" });
+await db.collection("users").doc("<userId>").update({ "credits.pagesAvailable": 1_000_000_000 });
+```
+
+### Revoke a user's access
+
+Delete `users/<userId>`. Any active Bearer tokens fail at the next `findAccount` lookup.
+
+### Revoke a specific token
+
+Hit the standard OAuth revocation endpoint:
+```bash
+curl -X POST https://<your-deployment>/oauth/token/revocation \
+  -u "<client_id>:<client_secret>" \
+  -d "token=<the_access_token>"
+```
+
+Or just delete the doc directly from `oidc_AccessToken` / `oidc_RefreshToken` collections.
 
 ## Self-hosting
 
-### Prerequisites
-
+Requirements:
 - GCP project with billing enabled
 - Node.js 22+, pnpm
+- An OAuth App with your IdP of choice (GitHub by default — Google, Microsoft, etc. work with a small adapter swap; see [Swapping the IdP](#swapping-the-idp))
+- `gcloud` logged in locally
 
-### Setup
+### 1. Clone & install
 
 ```bash
 git clone https://github.com/FrancoReyesDev/document-ai-mcp.git
@@ -79,7 +132,7 @@ cd document-ai-mcp
 pnpm install
 ```
 
-### Enable GCP APIs
+### 2. Enable GCP APIs
 
 ```bash
 gcloud services enable \
@@ -87,100 +140,158 @@ gcloud services enable \
   firestore.googleapis.com \
   run.googleapis.com \
   cloudtasks.googleapis.com \
-  storage.googleapis.com
+  storage.googleapis.com \
+  secretmanager.googleapis.com
 ```
 
-### Create Document AI processors
+### 3. Create Document AI processors
+
+One each of OCR, Form Parser, Layout Parser. Note each processor's resource name (`projects/{num}/locations/us/processors/{id}`).
+
+### 4. Create GitHub OAuth App
+
+GitHub → Settings → Developer settings → OAuth Apps → New.
+- **Homepage URL**: your web dashboard URL
+- **Authorization callback URL**: `https://<your-mcp-url>/oauth/interaction/callback/github`
+- **Scope**: `user:email`
+
+Save Client ID + Secret.
+
+### 5. Generate secrets
 
 ```bash
-# Create OCR, Form Parser, Layout Parser processors
-# via GCP Console or REST API (see CLAUDE.md for details)
+node -e "
+const c = require('node:crypto');
+const { privateKey } = c.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+const jwk = privateKey.export({ format: 'jwk' });
+jwk.kid = c.randomUUID(); jwk.alg = 'ES256'; jwk.use = 'sig';
+console.log('JWKS=', JSON.stringify({ keys: [jwk] }));
+console.log('COOKIE_KEYS=', JSON.stringify([c.randomBytes(32).toString('hex'), c.randomBytes(32).toString('hex')]));
+console.log('WEB_CLIENT_SECRET=', c.randomBytes(32).toString('hex'));
+"
 ```
 
-### Configure
+### 6. Upload secrets to GCP Secret Manager
 
 ```bash
-cp .env.example .env
-# Edit .env with your GCP project, processor IDs, etc.
+for s in github-oauth-client-id github-oauth-client-secret oauth-cookie-keys oauth-jwks web-client-secret; do
+  gcloud secrets create $s --replication-policy=automatic
+done
+# Then `gcloud secrets versions add $s --data-file=-` for each.
 ```
 
-### Run locally
+### 7. Configure Firestore TTLs
 
 ```bash
-pnpm build
-node dist/index.js
+for col in AccessToken RefreshToken AuthorizationCode Session Interaction Grant Client RegistrationAccessToken ReplayDetection PushedAuthorizationRequest; do
+  gcloud firestore fields ttls update expiresAt --collection-group="oidc_${col}" --enable-ttl --async
+done
+gcloud firestore fields ttls update expiresAt --collection-group=tasks --enable-ttl --async
 ```
 
-### Deploy to Cloud Run
+### 8. Configure GCS bucket lifecycle
+
+Create a bucket (default: `document-ai-mcp-batch-temp`) and apply a per-prefix lifecycle so results and uploads live 30 days but batch intermediates are cleaned in 1 day. See `docs/` or the deployed config for the exact rules.
+
+### 9. Deploy
 
 ```bash
 gcloud run deploy document-ai-mcp \
   --source . \
   --region us-central1 \
-  --memory 2Gi \
-  --timeout 600 \
-  --allow-unauthenticated
+  --memory 2Gi --timeout 600 \
+  --allow-unauthenticated \
+  --set-env-vars="GCP_PROJECT=<p>,SERVICE_URL=<url>,WEB_URL=<dashboard-url>,WEB_CLIENT_ID=document-ai-web,BATCH_BUCKET=<bucket>,WORKER_SA_EMAIL=<sa>,OCR_PROCESSOR=<name>,FORM_PARSER_PROCESSOR=<name>,LAYOUT_PARSER_PROCESSOR=<name>" \
+  --set-secrets="GITHUB_OAUTH_CLIENT_ID=github-oauth-client-id:latest,GITHUB_OAUTH_CLIENT_SECRET=github-oauth-client-secret:latest,OAUTH_COOKIE_KEYS=oauth-cookie-keys:latest,WEB_CLIENT_SECRET=web-client-secret:latest,OAUTH_JWKS=oauth-jwks:latest"
 ```
+
+### 10. Point Cloud Scheduler at `/cleanup`
+
+Create an OIDC-authenticated HTTP scheduler job that POSTs to `https://<url>/cleanup` every 15 minutes to mark zombie tasks as `failed`.
 
 ## Environment variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GCP_PROJECT` | Yes | GCP project ID |
-| `OCR_PROCESSOR` | Yes | OCR processor resource name |
-| `FORM_PARSER_PROCESSOR` | Yes | Form Parser processor resource name |
-| `LAYOUT_PARSER_PROCESSOR` | Yes | Layout Parser processor resource name |
-| `SERVICE_URL` | Yes | Cloud Run service URL (for Cloud Tasks callbacks) |
-| `WORKER_SA_EMAIL` | Yes | Service account email for OIDC |
-| `BATCH_BUCKET` | No | GCS bucket for batch processing (default: `document-ai-mcp-batch-temp`) |
-| `ADMIN_SECRET` | No | Shared secret for admin API (Secret Manager recommended) |
-| `ADMIN_EMAILS` | No | Comma-separated admin emails (get pro plan automatically) |
+| Variable | Required | Source | Notes |
+|---|---|---|---|
+| `GCP_PROJECT` | ✓ | env | Your GCP project ID |
+| `SERVICE_URL` | ✓ | env | The Cloud Run URL of this MCP |
+| `WEB_URL` | ✓ | env | Base URL of the dashboard. Change this one value when you buy a custom domain |
+| `WEB_CLIENT_ID` | ✓ | env | Pre-registered client ID for the web (default `document-ai-web`) |
+| `WEB_CLIENT_SECRET` | ✓ | Secret Manager | Shared with the web deployment |
+| `BATCH_BUCKET` | ✓ | env | GCS bucket for inputs, outputs, uploads |
+| `WORKER_SA_EMAIL` | ✓ | env | Service account email for OIDC tokens |
+| `OCR_PROCESSOR` / `FORM_PARSER_PROCESSOR` / `LAYOUT_PARSER_PROCESSOR` | ✓ | env | Document AI processor resource names |
+| `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | ✓ | Secret Manager | The MCP's GitHub OAuth App |
+| `OAUTH_COOKIE_KEYS` | ✓ | Secret Manager | JSON array of two 32-byte hex keys for `oidc-provider` cookies |
+| `OAUTH_JWKS` | ✓ | Secret Manager | JSON Web Key Set with one private EC P-256 key (`ES256`) |
 
-## Admin API
+## Swapping the IdP
 
-REST API for managing users. Protected with `X-Admin-Key` header.
+GitHub is the default identity provider for historic reasons (dev-friendly signup, universal among the target audience), but **the MCP is not locked to GitHub**. Identity delegation is isolated to two small files:
 
+- `src/oauth/github.ts` — ~80 lines. Wraps the external OAuth: exchange `code` for an access token, fetch the user's `id + email + name + avatar`. Purely functional, no side effects.
+- `src/oauth/interactions.ts` — the Express router that handles `oidc-provider`'s "interactions" flow. The part that redirects the user to the external IdP and reads them back from the callback.
+
+To use Google, Microsoft, or any OAuth 2.0 / OIDC provider:
+
+1. Write a sibling of `github.ts` — `google.ts`, `microsoft.ts`, etc. Export the same three functions (`authorizeUrl`, `exchangeCodeForAccessToken`, `fetchProfile`) adapted to the provider's API (authorize endpoint, token endpoint, userinfo shape, scopes).
+2. Swap the import in `interactions.ts` — `import { ... } from "./google.js"` — or make it runtime-selectable via an env var.
+3. Update the OAuth app callback URL in the IdP's dashboard to match `<SERVICE_URL>/oauth/interaction/callback/<provider>`.
+4. Replace the `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` env vars with the equivalent for your provider.
+
+The `UserRecord` schema (`users/{userId}`) already uses a generic `githubId` field. If you swap IdP, rename it to something neutral (`externalId`) or add a new field per provider if you want multi-provider support. Migration is a one-off Firestore script.
+
+For full multi-IdP (user picks Google OR GitHub), you'd loop over providers inside `interactions.ts` and route by query param — a couple hours of work, not a rewrite.
+
+## Retention
+
+| What | Where | TTL |
+|---|---|---|
+| Batch intermediates | `gs://.../batch/` | 1 day |
+| Results | `gs://.../results/` | 30 days |
+| Uploads | `gs://.../uploads/` | 30 days |
+| Tasks (Firestore) | `tasks/` | 90 days |
+| OAuth tokens, sessions, grants | `oidc_*/` | 7-30 days depending on kind |
+| Users | `users/` | Permanent |
+
+No formal GDPR delete-on-request flow yet — reach out if you need one.
+
+## Development
+
+```bash
+pnpm build     # tsc
+pnpm dev       # tsc --watch
+pnpm test      # vitest (18 unit tests)
 ```
-POST   /admin/users              — Create user (email, plan?)
-GET    /admin/users/:email       — Get user info
-GET    /admin/users/:email/usage — Quota + recent tasks
-POST   /admin/users/:email/rotate-key — Rotate API key
-POST   /admin/users/:email/upgrade    — Change plan
-DELETE /admin/users/:email       — Delete user
-```
 
-## Plans
-
-| Plan | Pages/month | Max pages/doc | Price |
-|------|-------------|---------------|-------|
-| Free | 100 | 50 | $0 |
-| Basic | 1,000 | 500 | $19/mo |
-| Pro | 10,000 | 2,000 | $49/mo |
-
-## Tech stack
-
-TypeScript, pnpm, Express 5, MCP SDK 1.28, Google Cloud (Document AI, Firestore, Cloud Storage, Cloud Tasks, Cloud Run)
-
-## Project structure
+The code is structured so the pure parts (Markdown formatters, credits math, OAuth helpers) have no dependency on Firestore or Document AI — they're tested with plain data. Infra is thin and opinionated.
 
 ```
 src/
-├── index.ts              # Express app + MCP transport + routes
-├── server.ts             # McpServer factory (7 tools)
-├── worker.ts             # Cloud Tasks worker (OIDC, processing)
-├── admin.ts              # Admin REST API
-├── register.ts           # Registration endpoint
-├── cleanup.ts            # Zombie task cleanup
-├── logger.ts             # Structured JSON logging
-├── types.ts              # Shared interfaces
-├── auth/                 # API key + admin key auth
-├── tools/                # 7 MCP tool handlers
-├── documentai/           # Document AI client, formatters, batch
-├── gcs/                  # Cloud Storage operations
-├── queue/                # Cloud Tasks enqueue + quota
+├── index.ts              # Express app + route wiring
+├── server.ts             # MCP server factory
+├── oauth/                # oidc-provider + Firestore adapter + GitHub interaction
+├── tools/                # 6 MCP tool handlers
+├── documentai/           # Document AI client, formatters, online + batch
+├── gcs/                  # Storage helpers
+├── queue/                # Cloud Tasks enqueue
 └── storage/              # Firestore user + task CRUD
 ```
 
+## Contributing
+
+Issues and PRs welcome. Three principles:
+1. **Every file under ~200 lines.** If a module grows past that, split it along a real seam.
+2. **Pure core, thin infra.** New business logic lands in a pure function before anything else. Infra wrapping follows.
+3. **No shared-secret HTTP auth.** User endpoints are OAuth Bearer; service endpoints are OIDC; webhook endpoints verify provider signatures. No `X-Admin-Key`.
+
 ## License
 
-ISC
+ISC. See [LICENSE](./LICENSE).
+
+## Credits
+
+- [Model Context Protocol](https://modelcontextprotocol.io) by Anthropic
+- [`oidc-provider`](https://github.com/panva/node-oidc-provider) by Filip Skokan
+- Google Document AI
+- The Chesterton's Fence principle, consulted approximately four times during the OAuth migration

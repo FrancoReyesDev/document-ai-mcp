@@ -24,16 +24,20 @@
     "@google-cloud/storage": "^7.19.0",
     "@google-cloud/tasks": "^6.2.1",
     "@modelcontextprotocol/sdk": "^1.28.0",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "google-auth-library": "^10.6.2",
+    "oidc-provider": "^9.8.2",
     "pdf-lib": "^1.17.1",
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.5.0",
+    "@types/oidc-provider": "^9.5.0",
     "typescript": "^6.0.2",
     "vitest": "^4.1.2"
   }

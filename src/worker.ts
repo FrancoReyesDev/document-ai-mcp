@@ -1,13 +1,10 @@
 import type { Request, Response } from "express";
-import { OAuth2Client } from "google-auth-library";
-import { getUserByApiKeyHash, updateTask, consumePages, getCredits } from "./storage/index.js";
+import { getUserById, updateTask, consumePages, getCredits } from "./storage/index.js";
 import { getDocumentAIClient, PROCESSORS, processDocument, formatOcrToMarkdown, formatFormToMarkdown, formatLayoutToMarkdown, countPdfPages } from "./documentai/index.js";
 import { splitMarkdownPages } from "./documentai/split-pages.js";
 import { uploadPagedResult, getPageCountFromMetadata, downloadGcsFile } from "./gcs/index.js";
 import type { ToolName, DocumentInput } from "./types.js";
 import { MAX_PAGES_PER_DOC } from "./types.js";
-
-const oidcClient = new OAuth2Client();
 
 interface WorkerPayload {
   taskId: string;
@@ -27,22 +24,6 @@ const PROCESSOR_KEYS: Record<ToolName, keyof typeof PROCESSORS> = {
   parse_form: "formParser",
   parse_layout: "layoutParser",
 };
-
-async function verifyOidc(req: Request): Promise<boolean> {
-  const saEmail = process.env.WORKER_SA_EMAIL;
-  if (!saEmail) return true;
-
-  const authHeader = req.headers["authorization"] as string | undefined;
-  if (!authHeader?.startsWith("Bearer ")) return false;
-
-  try {
-    const token = authHeader.slice(7);
-    await oidcClient.verifyIdToken({ idToken: token, audience: process.env.SERVICE_URL });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Resolves the page count of the input document.
@@ -72,18 +53,11 @@ async function resolvePageCount(input: DocumentInput): Promise<number> {
 }
 
 export async function handleWorker(req: Request, res: Response): Promise<void> {
-  if (!(await verifyOidc(req))) {
-    res.status(401).json({ error: "Unauthorized: invalid OIDC token" });
-    return;
-  }
-
   const payload = req.body as WorkerPayload;
   const { taskId, userId, toolName, input } = payload;
 
   try {
-    await updateTask(taskId, { status: "processing" });
-
-    const user = await getUserByApiKeyHash(userId);
+    const user = await getUserById(userId);
     if (!user) throw new Error("User not found");
 
     const pageCount = await resolvePageCount(input);
@@ -98,6 +72,9 @@ export async function handleWorker(req: Request, res: Response): Promise<void> {
     if (pageCount > credits.pagesAvailable) {
       throw new Error(`Document has ${pageCount} pages but you only have ${credits.pagesAvailable} pages available.`);
     }
+
+    // Marcar processing + persistir pageCount + startedAt (para ETA en get_result)
+    await updateTask(taskId, { status: "processing", pageCount, startedAt: new Date() });
 
     // Process
     const client = getDocumentAIClient();

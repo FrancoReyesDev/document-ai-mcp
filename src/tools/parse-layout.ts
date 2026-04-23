@@ -15,7 +15,7 @@ export function registerParseLayout(server: McpServer, userContext?: UserContext
 
       try {
         const taskId = await enqueueProcessing({
-          userId: userContext.apiKeyHash,
+          userId: userContext.userId,
           toolName: "parse_layout",
           input: { content, mimeType, gcsUri, url },
           credits: userContext.credits,
@@ -24,7 +24,7 @@ export function registerParseLayout(server: McpServer, userContext?: UserContext
         return {
           content: [{
             type: "text" as const,
-            text: `Task queued. ID: ${taskId}\nCall get_result("${taskId}") to check status and retrieve the result.`,
+            text: `Task queued. ID: ${taskId}\nCall get_result("${taskId}") in ~2000ms. The response will include an updated retry estimate if still processing.`,
           }],
         };
       } catch (error) {

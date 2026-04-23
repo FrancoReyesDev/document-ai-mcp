@@ -15,7 +15,8 @@ export async function uploadInput(
 ): Promise<{ gcsUri: string; prefix: string }> {
   const uuid = crypto.randomUUID();
   const ext = mimeTypeToExt(mimeType);
-  const prefix = `${userHash}/${uuid}`;
+  // `batch/` prefix → lifecycle puede borrar a 1d sin tocar results/ ni uploads/
+  const prefix = `batch/${userHash}/${uuid}`;
   const objectPath = `${prefix}/input.${ext}`;
 
   const bucket = getStorage().bucket(BATCH_BUCKET);

@@ -25,7 +25,10 @@ function cleanInput(input: DocumentInput): DocumentInput {
 export async function enqueueProcessing(params: EnqueueParams): Promise<string> {
   const credits = await getCredits(params.userId);
   if (credits.pagesAvailable <= 0) {
-    throw new Error("No pages available. Buy more pages at your dashboard.");
+    const dashboardUrl = `${process.env.WEB_URL ?? ""}/dashboard`;
+    throw new Error(
+      `No pages available. You've used your beta allowance. Visit ${dashboardUrl} to request more access.`,
+    );
   }
 
   const taskId = crypto.randomUUID();

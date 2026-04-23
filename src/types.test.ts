@@ -1,14 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { MAX_PAGES_PER_DOC, FREE_PAGES } from "./types.js";
+import { MAX_PAGES_PER_DOC } from "./types.js";
 import type { CreditInfo } from "./types.js";
 
 describe("Credits system", () => {
   it("MAX_PAGES_PER_DOC is Document AI hard limit", () => {
     expect(MAX_PAGES_PER_DOC).toBe(2000);
-  });
-
-  it("FREE_PAGES is 100", () => {
-    expect(FREE_PAGES).toBe(100);
   });
 
   it("document exceeds max pages per doc", () => {
